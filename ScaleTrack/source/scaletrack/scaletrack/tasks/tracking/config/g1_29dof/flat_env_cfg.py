@@ -71,3 +71,10 @@ class G1BFMTrackingEnvCfg(BFMTrackingEnvCfg):
                 "right_wrist_yaw_link",
             ]
         }
+
+
+@configclass
+class G1BFMDistillationEnvCfg(G1BFMTrackingEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.motion.mode_candidates = {"WholeBody-14": self.commands.motion.body_names.copy()}
