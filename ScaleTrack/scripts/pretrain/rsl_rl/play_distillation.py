@@ -11,7 +11,7 @@ parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--video", action="store_true")
 parser.add_argument("--video_length", type=int, default=1000)
 AppLauncher.add_app_launcher_args(parser)
-parser.add_argument("--checkpoint", required=True, help="Path to a student playback checkpoint.")
+parser.add_argument("--checkpoint", required=True, help="Path to a student checkpoint.")
 parser.add_argument("--motion_file", required=True)
 args_cli, hydra_args = parser.parse_known_args()
 if args_cli.video:

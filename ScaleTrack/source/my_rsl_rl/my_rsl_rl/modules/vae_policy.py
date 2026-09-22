@@ -17,7 +17,6 @@ class VAEPolicy(nn.Module):
         num_actions: int,
         hidden_dim: int = 256,
         latent_dim: int = 32,
-        inference_only: bool = False,
     ) -> None:
         super().__init__()
         self.obs_groups = {group: list(keys) for group, keys in obs_groups.items()}
@@ -31,9 +30,7 @@ class VAEPolicy(nn.Module):
             "hidden_dim": hidden_dim,
             "latent_dim": latent_dim,
         }
-        self.model = PULSEVAE(
-            num_proprio_obs, num_target_obs, num_actions, hidden_dim, latent_dim, inference_only=inference_only
-        )
+        self.model = PULSEVAE(num_proprio_obs, num_target_obs, num_actions, hidden_dim, latent_dim)
 
     def _get_obs(self, obs: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
         proprio = torch.cat([obs[key] for key in self.obs_groups["policy"]], dim=-1)
@@ -59,11 +56,9 @@ class VAEPolicy(nn.Module):
     def reset(self, dones: torch.Tensor | None = None) -> None:
         pass
 
-    def inference_state_dict(self) -> dict[str, torch.Tensor]:
-        return {key: value for key, value in self.state_dict().items() if not key.startswith("model.prior_encoder.")}
-
     @classmethod
     def from_checkpoint(cls, checkpoint: dict, device: str | torch.device = "cpu") -> VAEPolicy:
+        """Restore the posterior encoder, decoder, and prior."""
         config = checkpoint["policy_config"]
         obs = TensorDict(
             {key: torch.zeros(1, dim, device=device) for key, dim in config["obs_dims"].items()},
@@ -75,7 +70,6 @@ class VAEPolicy(nn.Module):
             config["num_actions"],
             hidden_dim=config["hidden_dim"],
             latent_dim=config["latent_dim"],
-            inference_only=True,
         ).to(device)
         policy.load_state_dict(checkpoint["model_state_dict"], strict=True)
         return policy.eval()

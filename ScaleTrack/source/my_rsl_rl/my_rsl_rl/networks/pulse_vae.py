@@ -87,11 +87,9 @@ class PULSEVAE(nn.Module):
         data_dim: int,
         hidden_dim: int = 256,
         latent_dim: int = 32,
-        inference_only: bool = False,
     ) -> None:
         super().__init__()
-        if not inference_only:
-            self.prior_encoder = ConditionalPrior(condition_dim, hidden_dim, latent_dim)
+        self.prior_encoder = ConditionalPrior(condition_dim, hidden_dim, latent_dim)
         self.encoder = ConditionalEncoder(condition_dim, encoder_additional_input_dim, hidden_dim, latent_dim)
         self.decoder = ConditionalDecoder(condition_dim, data_dim, hidden_dim, latent_dim)
 

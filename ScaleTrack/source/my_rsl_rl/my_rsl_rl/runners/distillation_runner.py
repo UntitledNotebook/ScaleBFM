@@ -152,10 +152,10 @@ class DistillationRunner:
         print(log_string)
 
     def save(self, path: str) -> None:
-        """Save only the policy and environment contract needed for playback."""
+        """Save (posterior, decoder, prior) and environment contract."""
         torch.save({
             "format_version": 1,
-            "model_state_dict": self.alg.policy.inference_state_dict(),
+            "model_state_dict": self.alg.policy.state_dict(),
             "policy_config": self.alg.policy.policy_config,
             "observation_config": self.env.observation_config,
             "action_config": self.env.action_config,
