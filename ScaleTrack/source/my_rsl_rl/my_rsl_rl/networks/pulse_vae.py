@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from .humanoid_transformer import HumanoidTransformer
+
 
 class _Layer(nn.Module):
     """Keep the original PULSE parameter names for weight comparisons."""
@@ -44,6 +46,57 @@ class ConditionalEncoder(nn.Module):
         return _sample(mu, logvar, noise), mu, logvar
 
 
+class TransformerPosterior(nn.Module):
+    """Encode policy/action history and future task tokens into a Gaussian latent."""
+
+    def __init__(
+        self,
+        prop_obs_dim: int,
+        action_dim: int,
+        latent_dim: int,
+        embedding_dim: int = 256,
+        num_heads: int = 4,
+        ff_dim: int = 256,
+        num_layers: int = 4,
+    ) -> None:
+        super().__init__()
+        self.prop_obs_dim = prop_obs_dim
+        self.action_dim = action_dim
+        self.embedding_dim = embedding_dim
+        self.transformer = HumanoidTransformer(
+            prop_obs_dim=prop_obs_dim,
+            action_dim=action_dim,
+            output_dim=2 * latent_dim,
+            embed_dim=embedding_dim,
+            num_heads=num_heads,
+            ff_dim=ff_dim,
+            num_layers=num_layers,
+        )
+        self.transformer.init_weights()
+        # Start near N(0, I), while allowing gradients into the attention trunk immediately.
+        nn.init.normal_(self.transformer.projection_head.weight, std=0.01 * embedding_dim ** -0.5)
+
+    def encode(
+        self,
+        prop_obs: torch.Tensor,
+        action_obs: torch.Tensor,
+        task_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return [B, latent_dim] statistics from the HumanoidTransformer inputs."""
+        statistics = self.transformer(prop_obs, action_obs, task_tokens)
+        return statistics.chunk(2, dim=-1)
+
+    def forward(
+        self,
+        prop_obs: torch.Tensor,
+        action_obs: torch.Tensor,
+        task_tokens: torch.Tensor,
+        noise: torch.Tensor | None = None,
+    ):
+        mu, logvar = self.encode(prop_obs, action_obs, task_tokens)
+        return _sample(mu, logvar, noise), mu, logvar
+
+
 class ConditionalPrior(nn.Module):
     def __init__(self, condition_dim: int, hidden_dim: int, latent_dim: int) -> None:
         super().__init__()
@@ -75,39 +128,3 @@ class ConditionalDecoder(nn.Module):
         h1 = self.fc1(torch.cat((latent, condition), dim=-1))
         h2 = self.fc2(torch.cat((latent, h1), dim=-1))
         return self.out(torch.cat((latent, h2), dim=-1))
-
-
-class PULSEVAE(nn.Module):
-    """Conditional VAE with a learned proprioceptive prior and one decoder."""
-
-    def __init__(
-        self,
-        condition_dim: int,
-        encoder_additional_input_dim: int,
-        data_dim: int,
-        hidden_dim: int = 256,
-        latent_dim: int = 32,
-    ) -> None:
-        super().__init__()
-        self.prior_encoder = ConditionalPrior(condition_dim, hidden_dim, latent_dim)
-        self.encoder = ConditionalEncoder(condition_dim, encoder_additional_input_dim, hidden_dim, latent_dim)
-        self.decoder = ConditionalDecoder(condition_dim, data_dim, hidden_dim, latent_dim)
-
-    def encode(self, data: torch.Tensor, condition: torch.Tensor, noise: torch.Tensor | None = None):
-        # Returns posterior (sample, mean, log_variance), each with shape (..., latent_dim).
-        return self.encoder(data, condition, noise)
-
-    def prior_encode(self, condition: torch.Tensor, noise: torch.Tensor | None = None):
-        # Returns prior (sample, mean, log_variance), each with shape (..., latent_dim).
-        return self.prior_encoder(condition, noise)
-
-    def decode(self, latent: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
-        # Returns reconstructed data with shape (..., data_dim).
-        return self.decoder(latent, condition)
-
-    def forward(self, encoder_input: torch.Tensor, condition: torch.Tensor):
-        # Returns reconstruction (..., data_dim), posterior (mu_q, logvar_q), and prior (mu_p, logvar_p), each statistic (..., latent_dim).
-        latent, mu_q, logvar_q = self.encode(encoder_input, condition)
-        # Retain the source model's posterior-then-prior sampling order.
-        _, mu_p, logvar_p = self.prior_encode(condition)
-        return self.decode(latent, condition), (mu_q, logvar_q), (mu_p, logvar_p)

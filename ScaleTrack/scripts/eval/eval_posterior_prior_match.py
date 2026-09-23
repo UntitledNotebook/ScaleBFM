@@ -359,9 +359,20 @@ def collect_latent_data(env, policy, args: EvalArgs, simulation_app) -> List[Tra
                 rows = active.nonzero(as_tuple=False).squeeze(-1)
                 if rows.numel() == 0:
                     break
-                proprio, target = policy._get_obs(obs[rows])
-                mu_q, logvar_q = policy.model.encoder.encode(target, proprio)
-                mu_p, logvar_p = policy.model.prior_encoder.encode(proprio)
+                active_obs = obs[rows]
+                proprio = torch.cat([active_obs[key] for key in policy.obs_groups["policy"]], dim=-1)
+                if policy.posterior_type == "mlp":
+                    target = torch.cat([active_obs[key] for key in policy.obs_groups["target"]], dim=-1)
+                    mu_q, logvar_q = policy.posterior.encode(target, proprio)
+                else:
+                    mu_q, logvar_q = policy.posterior.encode(
+                        torch.cat([active_obs[key] for key in policy.obs_groups["posterior_policy"]], dim=-1),
+                        torch.cat([active_obs[key] for key in policy.obs_groups["posterior_action"]], dim=-1),
+                        policy.posterior_task_embedder(
+                            torch.cat([active_obs[key] for key in policy.obs_groups["posterior_task"]], dim=-1)
+                        ),
+                    )
+                mu_p, logvar_p = policy.prior_stats(active_obs)
                 stats = torch.stack((mu_q, logvar_q, mu_p, logvar_p), dim=1)
                 if not torch.isfinite(stats).all():
                     raise RuntimeError("Non-finite encoder outputs; refusing to report invalid distribution metrics.")
@@ -371,7 +382,7 @@ def collect_latent_data(env, policy, args: EvalArgs, simulation_app) -> List[Tra
                 if args.use_stochastic:
                     noise = torch.randn(mu.shape, device=mu.device, dtype=mu.dtype, generator=generator)
                     latent = mu + args.temperature * (0.5 * logvar).exp() * noise
-                decoded = policy.model.decode(latent, proprio)
+                decoded = policy.decoder(latent, proprio)
                 if not torch.isfinite(decoded).all():
                     raise RuntimeError("Non-finite decoded actions; evaluation stopped before stepping the simulator.")
 

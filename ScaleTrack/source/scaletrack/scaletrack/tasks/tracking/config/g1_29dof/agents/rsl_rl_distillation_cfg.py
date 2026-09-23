@@ -37,10 +37,26 @@ class G1DistillationRunnerCfg(RslRlBaseRunnerCfg):
     wandb_project: str = "ScaleBFM"
     neptune_project: str = "ScaleBFM"
     empirical_normalization: bool = False
-    obs_groups: dict = {"policy": ["student_proprio"], "target": ["student_target"]}
+    obs_groups: dict = {
+        "policy": ["student_proprio"],
+        "posterior_policy": ["policy"],
+        "posterior_task": ["policy_task"],
+        "posterior_action": ["action"],
+    }
     observation: DistillationObservationCfg = DistillationObservationCfg()
     teacher: DistillationTeacherCfg = DistillationTeacherCfg()
-    policy: dict = {"class_name": "VAEPolicy", "hidden_dim": 256, "latent_dim": 32}
+    policy: dict = {
+        "class_name": "VAEPolicy",
+        "hidden_dim": 256,
+        "latent_dim": 32,
+        "posterior_type": "transformer",
+        "posterior_cfg": {
+            "embedding_dim": 256,
+            "num_heads": 4,
+            "ff_dim": 256,
+            "num_layers": 4,
+        },
+    }
     algorithm: dict = {
         "class_name": "Distillation",
         "num_learning_epochs": 5,
