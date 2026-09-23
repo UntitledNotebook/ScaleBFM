@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from typing import Literal
 
 import torch
 from tensordict import TensorDict
@@ -19,7 +20,7 @@ class VAEPolicy(nn.Module):
         num_actions: int,
         hidden_dim: int = 256,
         latent_dim: int = 32,
-        posterior_type: str = "mlp" | "transformer",
+        posterior_type: Literal["mlp", "transformer"] = "mlp",
         posterior_cfg: dict | None = None,
     ) -> None:
         super().__init__()
