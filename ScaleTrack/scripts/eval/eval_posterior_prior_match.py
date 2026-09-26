@@ -372,7 +372,7 @@ def collect_latent_data(env, policy, args: EvalArgs, simulation_app) -> List[Tra
                             torch.cat([active_obs[key] for key in policy.obs_groups["posterior_task"]], dim=-1)
                         ),
                     )
-                mu_p, logvar_p = policy.prior_stats(active_obs)
+                mu_p, logvar_p = policy.prior.encode(proprio)
                 stats = torch.stack((mu_q, logvar_q, mu_p, logvar_p), dim=1)
                 if not torch.isfinite(stats).all():
                     raise RuntimeError("Non-finite encoder outputs; refusing to report invalid distribution metrics.")
