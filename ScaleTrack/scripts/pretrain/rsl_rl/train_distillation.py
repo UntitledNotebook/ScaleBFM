@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from datetime import timedelta
 
 from isaaclab.app import AppLauncher
 
@@ -70,7 +71,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: G1DistillationRunnerCfg):
         env_cfg.sim.device = agent_cfg.device = device
         torch.cuda.set_device(app_launcher.local_rank)
         # Motion loading uses collectives during environment construction.
-        torch.distributed.init_process_group(backend="nccl")
+        torch.distributed.init_process_group(
+            backend="nccl", timeout=timedelta(seconds=72000)
+        )
     elif int(os.getenv("WORLD_SIZE", "1")) > 1:
         raise ValueError("Use --distributed when launching with torchrun.")
     agent_cfg.seed += rank
