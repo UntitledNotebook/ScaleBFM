@@ -9,6 +9,7 @@
 
 import argparse
 import sys
+from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
@@ -27,12 +28,19 @@ parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy 
 parser.add_argument("--motion_file", type=str, required=True, help="The name of the motion file.")
 parser.add_argument("--test_motion_file", type=str, default="", help="The name of the motion file for test set.")
 parser.add_argument("--distributed", action="store_true", default=False, help="Distributed training.")
+parser.add_argument("--xl_checkpoint", help="Original XL weights used to initialize switch-aware PPO and its clean teacher.")
+parser.add_argument("--clean_kl_coef", type=float, default=1.0, help="Clean teacher KL weight per action dimension.")
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+switch_training = args_cli.task == "G1-BFM-Transformer-Switch-Tracking"
+if switch_training != bool(args_cli.xl_checkpoint):
+    parser.error("The switch-aware task requires --xl_checkpoint; use that option only with this task.")
+if args_cli.xl_checkpoint:
+    args_cli.xl_checkpoint = str(Path(args_cli.xl_checkpoint).resolve(strict=True))
 
 # always enable cameras to record video
 if args_cli.video:
@@ -99,7 +107,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent_cfg.device = f"cuda:{app_launcher.local_rank}"
 
         # set seed to have diversity in different threads
-        seed = agent_cfg.seed + app_launcher.local_rank
+        seed = agent_cfg.seed + int(os.environ["RANK"])
         env_cfg.seed = seed
         agent_cfg.seed = seed
 
@@ -109,8 +117,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         assert gpu_world_size > 1, f"You have enabled distributed training but there is only {gpu_world_size} GPUs detected!"
         
         # weishuai: We init communication at the very beginning instead of the runner as the initialization of some environment components may need sync.
-        torch.distributed.init_process_group(backend="nccl", rank=gpu_global_rank, world_size=gpu_world_size)
         torch.cuda.set_device(gpu_local_rank)
+        torch.distributed.init_process_group(backend="nccl", rank=gpu_global_rank, world_size=gpu_world_size)
+        gpu_info = torch.cuda.get_device_properties(gpu_local_rank)
+        print(f"[NCCL] rank={gpu_global_rank}/{gpu_world_size} local_rank={gpu_local_rank} "
+              f"device=cuda:{torch.cuda.current_device()} gpu={gpu_info.name} uuid={gpu_info.uuid} "
+              f"nccl={torch.cuda.nccl.version()}", flush=True)
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
@@ -122,6 +134,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     #     log_dir += f"_{agent_cfg.run_name}"
     log_dir = agent_cfg.run_name
     log_dir = os.path.join(log_root_path, log_dir)
+    if switch_training and not agent_cfg.resume and any(Path(log_dir).glob("model_*.pt")):
+        raise ValueError("Run already contains checkpoints. Choose a new --run_name or use --resume.")
+    if switch_training and agent_cfg.logger not in {"tensorboard", "wandb"}:
+        raise ValueError("The switch task supports tensorboard and scalar-only wandb logging.")
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -148,6 +164,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     runner = OnPolicyRunner(
         env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device
     )
+    if switch_training:
+        runner.initialize_switch_finetuning(args_cli.xl_checkpoint, args_cli.clean_kl_coef)
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # save resume path before creating a new log_dir
@@ -163,6 +181,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # close the simulator
     env.close()
+    if runner.writer is not None:
+        if runner.logger_type == "wandb":
+            runner.writer.stop()
+        runner.writer.close()
+    if args_cli.distributed:
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

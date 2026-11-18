@@ -7,6 +7,12 @@ if TYPE_CHECKING:
     from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg
 
 
+def _parse_bool(value: str) -> bool:
+    if value.lower() not in {"true", "false"}:
+        raise argparse.ArgumentTypeError("expected true or false")
+    return value.lower() == "true"
+
+
 def add_rsl_rl_args(parser: argparse.ArgumentParser):
     """Add RSL-RL arguments to the parser.
 
@@ -21,7 +27,9 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
     )
     arg_group.add_argument("--run_name", type=str, default="debug", help="Run name suffix to the log directory.")
     # -- load arguments
-    arg_group.add_argument("--resume", type=bool, default=None, help="Whether to resume from a checkpoint.")
+    arg_group.add_argument("--resume", nargs="?", const=True, default=None,
+                           type=_parse_bool,
+                           help="Resume optimizer state and training iteration from a run checkpoint.")
     arg_group.add_argument("--load_run", type=str, default=None, help="Name of the run folder to resume from.")
     arg_group.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file to resume from.")
     # -- logger arguments

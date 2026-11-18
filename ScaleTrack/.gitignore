@@ -18,6 +18,7 @@
 !.vscode
 
 # Outputs
+/.switch_local/
 **/runs/*
 **/logs/*
 **/recordings/*

@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from itertools import chain
+from copy import deepcopy
 from tensordict import TensorDict
 
 from my_rsl_rl.modules import ActorCritic, ActorCriticHumanoidTransformer
@@ -76,6 +76,21 @@ class PPO:
         self.schedule = schedule
         self.actor_learning_rate = actor_learning_rate
         self.critic_learning_rate = critic_learning_rate
+        self.clean_teacher = None
+
+    def freeze_clean_teacher(self, coefficient: float) -> None:
+        """Snapshot the imported XL actor. Supervise only pre-action clean observations."""
+        if not isinstance(self.policy, ActorCriticHumanoidTransformer) or self.policy.state_dependent_std:
+            raise ValueError("The clean anchor requires the XL transformer with state-independent action noise.")
+        if self.policy.noise_std_type != "scalar" or not (self.policy.std > 0).all():
+            raise ValueError("The XL checkpoint must have positive, scalar-parameterized action standard deviations.")
+        self.clean_kl_coef = coefficient
+        self.clean_teacher = deepcopy(self.policy).requires_grad_(False).eval()
+        # The critic is never evaluated by the teacher.
+        del self.clean_teacher.critic, self.clean_teacher.critic_task_embedder
+        shape = self.storage.observations.batch_size
+        self.storage.observations["xl_clean"] = torch.zeros(shape, device=self.device, dtype=torch.bool)
+        self.storage.observations["xl_mean"] = torch.zeros(*shape, self.policy.std.numel(), device=self.device)
 
     def init_storage(
         self,
@@ -95,7 +110,7 @@ class PPO:
             self.device,
         )
 
-    def act(self, obs: TensorDict) -> torch.Tensor:
+    def act(self, obs: TensorDict, clean_mask: torch.Tensor | None = None) -> torch.Tensor:
         # Compute the actions and values
         self.transition.actions = self.policy.act(obs).detach()
         self.transition.values = self.policy.evaluate(obs).detach()
@@ -104,7 +119,39 @@ class PPO:
         self.transition.action_sigma = self.policy.action_std.detach()
         # Record observations before env.step()
         self.transition.observations = obs
+        if self.clean_teacher is not None:
+            if clean_mask is None or clean_mask.dtype != torch.bool or clean_mask.shape != obs.batch_size:
+                raise ValueError("Expected a per-environment, pre-action boolean clean mask.")
+            clean_mask = clean_mask.to(self.device).clone()
+            target = torch.zeros_like(self.transition.action_mean)
+            if clean_mask.any():
+                teacher = self.clean_teacher
+                prop, task, action = teacher.get_actor_obs(obs[clean_mask])
+                with torch.no_grad():
+                    target[clean_mask] = teacher.actor(prop, action, teacher.actor_task_embedder(task))
+            # These two fields belong to storage only, never to the environment or the XL input.
+            self.transition.observations = obs.copy()
+            self.transition.observations["xl_clean"] = clean_mask
+            self.transition.observations["xl_mean"] = target
         return self.transition.actions
+
+    def _clean_kl(self, obs: TensorDict, mean: torch.Tensor, sigma: torch.Tensor):
+        mask = obs["xl_clean"]
+        student_std = sigma[mask]
+        teacher_std = self.clean_teacher.std
+        # KL(teacher || student), averaged over the 29 joints.
+        kl_sum = (
+            torch.log(student_std / teacher_std)
+            + (teacher_std.square() + (obs["xl_mean"][mask] - mean[mask]).square()) / (2 * student_std.square())
+            - 0.5
+        ).mean(dim=-1).sum()
+        local_count = mask.sum()
+        global_count = local_count.clone()
+        if self.is_multi_gpu:
+            torch.distributed.all_reduce(global_count)
+        # reduce_parameters averages rank gradients, including ranks with zero clean samples.
+        loss = kl_sum * (self.gpu_world_size / global_count.clamp_min(1))
+        return loss, kl_sum.detach(), local_count
 
     def process_env_step(
         self, obs: TensorDict, rewards: torch.Tensor, dones: torch.Tensor, extras: dict[str, torch.Tensor]
@@ -136,6 +183,7 @@ class PPO:
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_entropy = 0
+        teacher_stats = torch.zeros(3, device=self.device)
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
 
@@ -225,6 +273,12 @@ class PPO:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+            if self.clean_teacher is not None:
+                clean_loss, kl_sum, count = self._clean_kl(obs_batch, mu_batch, sigma_batch)
+                loss = loss + self.clean_kl_coef * clean_loss
+                teacher_stats[0] += kl_sum
+                teacher_stats[1] += count
+                teacher_stats[2] += original_batch_size
 
             # Compute the gradients for PPO
             self.actor_optimizer.zero_grad()
@@ -260,17 +314,20 @@ class PPO:
             "surrogate": mean_surrogate_loss,
             "entropy": mean_entropy,
         }
+        if self.clean_teacher is not None:
+            if self.is_multi_gpu:
+                torch.distributed.all_reduce(teacher_stats)
+            loss_dict["clean_teacher_kl"] = (teacher_stats[0] / teacher_stats[1].clamp_min(1)).item()
+            loss_dict["clean_fraction"] = (teacher_stats[1] / teacher_stats[2]).item()
 
         return loss_dict
 
     def broadcast_parameters(self) -> None:
         """Broadcast model parameters to all GPUs."""
-        # Obtain the model parameters on current GPU
-        model_params = [self.policy.state_dict()]
-        # Broadcast the model parameters
-        torch.distributed.broadcast_object_list(model_params, src=0)
-        # Load the model parameters on all GPUs from source GPU
-        self.policy.load_state_dict(model_params[0])
+        # Keep each receiving tensor on its own device. Pickling a CUDA state_dict
+        # can otherwise materialize rank 0 device tensors in every process.
+        for tensor in self.policy.state_dict().values():
+            torch.distributed.broadcast(tensor, src=0)
 
     def reduce_parameters(self) -> None:
         """Collect gradients from all GPUs and average them.

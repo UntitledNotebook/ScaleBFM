@@ -228,7 +228,7 @@ class ActorCriticHumanoidTransformer(nn.Module):
                 mode_obs = mode_obs.unsqueeze(-2).repeat(1, task_obs.shape[-2], 1)
             
             if not inference:
-                task_obs *= mode_mapping
+                task_obs = task_obs * mode_mapping
             else:
                 mode_obs = torch.ones_like(mode_obs, device=mode_obs.device)
 

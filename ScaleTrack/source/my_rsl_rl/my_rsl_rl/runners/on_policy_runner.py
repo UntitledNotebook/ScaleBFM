@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import os
 import math
+import hashlib
 import statistics
+import tempfile
 import time
 import torch
 import warnings
@@ -61,6 +63,8 @@ class OnPolicyRunner:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+        self.switch_training = None
+        self.switch_command = None
         self.git_status_repos = [my_rsl_rl.__file__]
 
         self.eval_during_training = self.cfg["eval_during_training"]
@@ -70,6 +74,29 @@ class OnPolicyRunner:
         self.success_metric_dict = self.cfg.get('success_metric_dict', {})
         self.command_name = self.cfg.get('command_name', 'motion')
         self.success_discount_coef = self.cfg.get("success_discount_coef", 0.999)
+
+    def initialize_switch_finetuning(self, xl_checkpoint: str, clean_kl_coef: float = 1.0) -> None:
+        """Start at update zero with strict XL weights, fresh Adam and a frozen clean teacher."""
+        if not math.isfinite(clean_kl_coef) or clean_kl_coef < 0:
+            raise ValueError("clean_kl_coef must be finite and nonnegative.")
+        policy = self.alg.policy
+        if not isinstance(policy, ActorCriticHumanoidTransformer) or policy.actor.transformer_blocks[0].self_attention.num_heads != 6:
+            raise ValueError("Expected the six-head ScaleTrack XL transformer.")
+        command = self.env.unwrapped.command_manager.get_term(self.command_name)
+        if not hasattr(command, "clean_teacher_mask") or not hasattr(command, "set_training_iteration"):
+            raise ValueError("XL fine-tuning requires the switch-aware motion command.")
+        if self.current_learning_iteration or self.alg.actor_optimizer.state or self.alg.critic_optimizer.state:
+            raise RuntimeError("Initialize XL fine-tuning before learning or restoring an experiment.")
+        with open(xl_checkpoint, "rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        xl = torch.load(xl_checkpoint, map_location="cpu", weights_only=True, mmap=True)
+        self.alg.policy.load_state_dict(xl["model_state_dict"], strict=True)
+        self.alg.freeze_clean_teacher(clean_kl_coef)
+        self.switch_command = command
+        self.switch_training = {"xl_sha256": digest, "clean_kl_coef": clean_kl_coef, "xl_iteration": xl["iter"]}
+        self.cfg["scalar_metrics_only"] = True
+        if not self.disable_logs:
+            print(f"[XL] Imported update {xl['iter']}, SHA256 {digest}, fresh PPO update 0", flush=True)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         # Initialize writer
@@ -103,11 +130,14 @@ class OnPolicyRunner:
         for it in range(start_iter, tot_iter):
 
             start = time.time()
+            if self.switch_command is not None:
+                self.switch_command.set_training_iteration(it)
             # Rollout
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
                     # Sample actions
-                    actions = self.alg.act(obs)
+                    clean_mask = self.switch_command.clean_teacher_mask if self.switch_command is not None else None
+                    actions = self.alg.act(obs, clean_mask=clean_mask)
                     # Step the environment
                     obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
                     # Move to device
@@ -144,6 +174,12 @@ class OnPolicyRunner:
             stop = time.time()
             learn_time = stop - start
             self.current_learning_iteration = it
+            if self.switch_training is not None:
+                self.current_learning_iteration = it + 1
+                if it == start_iter or (it + 1) % self.save_interval == 0:
+                    print(f"[PPO] rank={self.gpu_global_rank}/{self.gpu_world_size} device={self.device} "
+                          f"completed={it + 1} local_steps={self.num_steps_per_env * self.env.num_envs} "
+                          f"value_loss={loss_dict['value_function']:.6g}", flush=True)
 
             if self.eval_during_training and (it + 1) % self.eval_interval == 0:
                 if self.log_dir is not None and not self.disable_logs:
@@ -160,13 +196,13 @@ class OnPolicyRunner:
                 # Log information
                 self.log(locals())
                 # Save model
-                if it % self.save_interval == 0:
-                    self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
+                if self.current_learning_iteration % self.save_interval == 0 or (self.switch_training and it == start_iter):
+                    self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
             # Clear episode infos
             ep_infos.clear()
             # Save code state
-            if it == start_iter and not self.disable_logs:
+            if it == start_iter and self.log_dir is not None and not self.disable_logs and self.switch_training is None:
                 # Obtain all the diff files
                 git_file_paths = store_code_state(self.log_dir, self.git_status_repos)
                 # If possible store them to wandb or neptune
@@ -235,6 +271,9 @@ class OnPolicyRunner:
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar("Perf/collection time", locs["collection_time"], locs["it"])
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
+        if self.switch_training is not None:
+            self.writer.add_scalar("Train/global_env_steps", self.tot_timesteps, locs["it"])
+            self.writer.add_scalar("Train/world_size", self.gpu_world_size, locs["it"])
 
         # Log training
         if len(locs["rewbuffer"]) > 0:
@@ -304,14 +343,31 @@ class OnPolicyRunner:
             "infos": infos,
         }
 
-        torch.save(saved_dict, path)
+        if self.switch_training is not None:
+            saved_dict["switch_training"] = self.switch_training
+            saved_dict["global_steps"] = self.tot_timesteps
+            saved_dict["training_time"] = self.tot_time
+        # A preemption must leave the last complete checkpoint loadable.
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(os.path.abspath(path)), delete=False) as stream:
+            tmp_path = stream.name
+        try:
+            torch.save(saved_dict, tmp_path)
+            os.replace(tmp_path, path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
         # Upload model to external logging service
         # if self.logger_type in ["neptune", "wandb"] and not self.disable_logs:
         #     self.writer.save_model(path, self.current_learning_iteration)
 
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
-        loaded_dict = torch.load(path, weights_only=False, map_location=map_location)
+        loaded_dict = torch.load(path, weights_only=False, map_location=map_location or self.device)
+        if self.switch_training is not None:
+            if loaded_dict.get("switch_training") != self.switch_training:
+                raise ValueError("Resume checkpoint has a different or missing frozen XL anchor or KL coefficient.")
+            self.tot_timesteps = loaded_dict["global_steps"]
+            self.tot_time = loaded_dict["training_time"]
         # Load model
         resumed_training = self.alg.policy.load_state_dict(loaded_dict["model_state_dict"])
         # Load optimizer if used
@@ -319,6 +375,8 @@ class OnPolicyRunner:
             # Algorithm optimizer
             self.alg.actor_optimizer.load_state_dict(loaded_dict["actor_optimizer_state_dict"])
             self.alg.critic_optimizer.load_state_dict(loaded_dict["critic_optimizer_state_dict"])
+            self.alg.actor_learning_rate = self.alg.actor_optimizer.param_groups[0]["lr"]
+            self.alg.critic_learning_rate = self.alg.critic_optimizer.param_groups[0]["lr"]
         # Load current learning iteration
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]
@@ -364,7 +422,8 @@ class OnPolicyRunner:
         }
 
         # Check if user has device specified for local rank
-        if self.device != f"cuda:{self.gpu_local_rank}":
+        cpu_gloo = self.device == "cpu" and torch.distributed.is_initialized() and torch.distributed.get_backend() == "gloo"
+        if self.device != f"cuda:{self.gpu_local_rank}" and not cpu_gloo:
             raise ValueError(
                 f"Device '{self.device}' does not match expected device for local rank '{self.gpu_local_rank}'."
             )

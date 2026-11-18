@@ -71,3 +71,18 @@ class G1BFMMlpPPORunnerCfg(G1BFMTransformerPPORunnerCfg):
         activation="elu",
         state_dependent_std=False, # weishuai: DoubleHead
     )
+
+@configclass
+class G1BFMSwitchXLRunnerCfg(G1BFMTransformerPPORunnerCfg):
+    experiment_name = "g1_bfm_switch_xl"
+    eval_during_training = False
+    save_interval = 50
+
+    def __post_init__(self):
+        self.policy.embedding_dim = 384
+        self.policy.num_heads = 6
+        self.policy.ff_dim = 384
+        self.policy.num_layers = 6
+        self.algorithm.actor_learning_rate = 1.0e-5
+        self.algorithm.critic_learning_rate = 1.0e-4
+        self.algorithm.schedule = "fixed"

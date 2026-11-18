@@ -271,6 +271,10 @@ class MotionCommand(CommandTerm):
         frame_offsets = self._future_frame_offsets_manual(future_idx)
         return self._global_time_indices(frame_offsets)
 
+    def _map_reference(self, value: torch.Tensor, field: str) -> torch.Tensor:
+        """Map native clip coordinates into the local scene frame before adding scene origins."""
+        return value
+
     def body_pos_w_future_manual(self, future_idx: Sequence[int]) -> torch.Tensor:
         key = tuple(future_idx)
         cache = self._future_manual_cache.setdefault(key, {})
@@ -280,7 +284,7 @@ class MotionCommand(CommandTerm):
                 global_indices = self._global_time_indices_manual(future_idx)
                 cache["global_indices"] = global_indices
                 cache["frame_offsets"] = self._future_frame_offsets_manual(future_idx)
-            body_pos_all = self._gather_cat_by_global_indices(self.cat_body_pos_w, global_indices).to(self.device)
+            body_pos_all = self._map_reference(self._gather_cat_by_global_indices(self.cat_body_pos_w, global_indices).to(self.device), "body_pos_w")
             body_pos_all = body_pos_all + self._env.scene.env_origins[:, None, None, :]
             cache["body_pos_w_future"] = body_pos_all
         return cache["body_pos_w_future"]
@@ -294,7 +298,7 @@ class MotionCommand(CommandTerm):
                 global_indices = self._global_time_indices_manual(future_idx)
                 cache["global_indices"] = global_indices
                 cache["frame_offsets"] = self._future_frame_offsets_manual(future_idx)
-            body_quat_all = self._gather_cat_by_global_indices(self.cat_body_quat_w, global_indices).to(self.device)
+            body_quat_all = self._map_reference(self._gather_cat_by_global_indices(self.cat_body_quat_w, global_indices).to(self.device), "body_quat_w")
             cache["body_quat_w_future"] = body_quat_all
         return cache["body_quat_w_future"]
 
@@ -307,7 +311,7 @@ class MotionCommand(CommandTerm):
                 global_indices = self._global_time_indices_manual(future_idx)
                 cache["global_indices"] = global_indices
                 cache["frame_offsets"] = self._future_frame_offsets_manual(future_idx)
-            body_lin_vel_all = self._gather_cat_by_global_indices(self.cat_body_lin_vel_w, global_indices).to(self.device)
+            body_lin_vel_all = self._map_reference(self._gather_cat_by_global_indices(self.cat_body_lin_vel_w, global_indices).to(self.device), "body_lin_vel_w")
             cache["body_lin_vel_w_future"] = body_lin_vel_all
         return cache["body_lin_vel_w_future"]
 
@@ -320,7 +324,7 @@ class MotionCommand(CommandTerm):
                 global_indices = self._global_time_indices_manual(future_idx)
                 cache["global_indices"] = global_indices
                 cache["frame_offsets"] = self._future_frame_offsets_manual(future_idx)
-            body_ang_vel_all = self._gather_cat_by_global_indices(self.cat_body_ang_vel_w, global_indices).to(self.device)
+            body_ang_vel_all = self._map_reference(self._gather_cat_by_global_indices(self.cat_body_ang_vel_w, global_indices).to(self.device), "body_ang_vel_w")
             cache["body_ang_vel_w_future"] = body_ang_vel_all
         return cache["body_ang_vel_w_future"]
 
@@ -349,19 +353,19 @@ class MotionCommand(CommandTerm):
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        return self.cat_body_pos_w[self._global_time_index()].to(self.device) + self._env.scene.env_origins[:, None, :]
+        return self._map_reference(self.cat_body_pos_w[self._global_time_index()].to(self.device), "body_pos_w") + self._env.scene.env_origins[:, None, :]
 
     @property
     def body_quat_w(self) -> torch.Tensor:
-        return self.cat_body_quat_w[self._global_time_index()].to(self.device)
+        return self._map_reference(self.cat_body_quat_w[self._global_time_index()].to(self.device), "body_quat_w")
 
     @property
     def body_lin_vel_w(self) -> torch.Tensor:
-        return self.cat_body_lin_vel_w[self._global_time_index()].to(self.device)
+        return self._map_reference(self.cat_body_lin_vel_w[self._global_time_index()].to(self.device), "body_lin_vel_w")
 
     @property
     def body_ang_vel_w(self) -> torch.Tensor:
-        return self.cat_body_ang_vel_w[self._global_time_index()].to(self.device)
+        return self._map_reference(self.cat_body_ang_vel_w[self._global_time_index()].to(self.device), "body_ang_vel_w")
 
     @property
     def anchor_pos_w(self) -> torch.Tensor:
@@ -397,7 +401,7 @@ class MotionCommand(CommandTerm):
     def body_pos_w_future(self) -> torch.Tensor:
         frame_offsets = self._future_frame_offsets()
         global_indices = self._global_time_indices(frame_offsets)  # (num_envs, num_frames)
-        body_pos_all = self.cat_body_pos_w[global_indices].to(self.device)  # (num_envs, num_frames, num_bodies, 3)
+        body_pos_all = self._map_reference(self.cat_body_pos_w[global_indices].to(self.device), "body_pos_w")  # (num_envs, num_frames, num_bodies, 3)
         body_pos_all = body_pos_all + self._env.scene.env_origins[:, None, None, :]  # Add env origins
         return body_pos_all
     
@@ -405,28 +409,28 @@ class MotionCommand(CommandTerm):
     def body_quat_w_future(self) -> torch.Tensor:
         frame_offsets = self._future_frame_offsets()
         global_indices = self._global_time_indices(frame_offsets)  # (num_envs, num_frames)
-        body_quat_all = self.cat_body_quat_w[global_indices].to(self.device)  # (num_envs, num_frames, num_bodies, 4)
+        body_quat_all = self._map_reference(self.cat_body_quat_w[global_indices].to(self.device), "body_quat_w")  # (num_envs, num_frames, num_bodies, 4)
         return body_quat_all
     
     @property
     def body_lin_vel_w_future(self) -> torch.Tensor:
         frame_offsets = self._future_frame_offsets()
         global_indices = self._global_time_indices(frame_offsets)  # (num_envs, num_frames)
-        body_lin_vel_all = self.cat_body_lin_vel_w[global_indices].to(self.device)  # (num_envs, num_frames, num_bodies, 3)
+        body_lin_vel_all = self._map_reference(self.cat_body_lin_vel_w[global_indices].to(self.device), "body_lin_vel_w")  # (num_envs, num_frames, num_bodies, 3)
         return body_lin_vel_all
     
     @property
     def body_ang_vel_w_future(self) -> torch.Tensor:
         frame_offsets = self._future_frame_offsets()
         global_indices = self._global_time_indices(frame_offsets)  # (num_envs, num_frames)
-        body_ang_vel_all = self.cat_body_ang_vel_w[global_indices].to(self.device)  # (num_envs, num_frames, num_bodies, 3)
+        body_ang_vel_all = self._map_reference(self.cat_body_ang_vel_w[global_indices].to(self.device), "body_ang_vel_w")  # (num_envs, num_frames, num_bodies, 3)
         return body_ang_vel_all
 
     @property
     def anchor_pos_w_future(self) -> torch.Tensor:
         frame_offsets = self._future_frame_offsets()
         global_indices = self._global_time_indices(frame_offsets)  # (num_envs, num_frames)
-        anchor_pos_all = self.cat_body_pos_w[global_indices, self.motion_anchor_body_index].to(self.device)  # (num_envs, num_frames, 3)
+        anchor_pos_all = self._map_reference(self.cat_body_pos_w[global_indices, self.motion_anchor_body_index].to(self.device), "body_pos_w")  # (num_envs, num_frames, 3)
         anchor_pos_all = anchor_pos_all + self._env.scene.env_origins[:, None, :]  # Add env origins
 
         return anchor_pos_all
@@ -435,21 +439,21 @@ class MotionCommand(CommandTerm):
     def anchor_quat_w_future(self) -> torch.Tensor:
         frame_offsets = self._future_frame_offsets()
         global_indices = self._global_time_indices(frame_offsets)  # (num_envs, num_frames)
-        anchor_quat_all = self.cat_body_quat_w[global_indices, self.motion_anchor_body_index].to(self.device)  # (num_envs, num_frames, 4)
+        anchor_quat_all = self._map_reference(self.cat_body_quat_w[global_indices, self.motion_anchor_body_index].to(self.device), "body_quat_w")  # (num_envs, num_frames, 4)
         return anchor_quat_all
     
     @property
     def anchor_lin_vel_w_future(self) -> torch.Tensor:
         frame_offsets = self._future_frame_offsets()
         global_indices = self._global_time_indices(frame_offsets)  # (num_envs, num_frames)
-        anchor_lin_vel_all = self.cat_body_lin_vel_w[global_indices, self.motion_anchor_body_index].to(self.device)  # (num_envs, num_frames, 3)
+        anchor_lin_vel_all = self._map_reference(self.cat_body_lin_vel_w[global_indices, self.motion_anchor_body_index].to(self.device), "body_lin_vel_w")  # (num_envs, num_frames, 3)
         return anchor_lin_vel_all
     
     @property
     def anchor_ang_vel_w_future(self) -> torch.Tensor:
         frame_offsets = self._future_frame_offsets()
         global_indices = self._global_time_indices(frame_offsets)  # (num_envs, num_frames)
-        anchor_ang_vel_all = self.cat_body_ang_vel_w[global_indices, self.motion_anchor_body_index].to(self.device)  # (num_envs, num_frames, 3)
+        anchor_ang_vel_all = self._map_reference(self.cat_body_ang_vel_w[global_indices, self.motion_anchor_body_index].to(self.device), "body_ang_vel_w")  # (num_envs, num_frames, 3)
         return anchor_ang_vel_all
     
     @property
@@ -559,11 +563,7 @@ class MotionCommand(CommandTerm):
         self.metrics["error_joint_pos"] = torch.norm(self.joint_pos - self.robot_joint_pos, dim=-1)
         self.metrics["error_joint_vel"] = torch.norm(self.joint_vel - self.robot_joint_vel, dim=-1)
 
-    def _resample_command(self, env_ids: Sequence[int]):
-        if len(env_ids) == 0:
-            return
-        
-        env_ids_cpu = env_ids.cpu()
+    def _reset_reference_phase(self, env_ids_cpu: torch.Tensor):
         if not self.is_evaluating:
             motion_len = self.time_totals.gather(0, self.motion_ids[env_ids_cpu])
             if self.randomize_next_resampling:
@@ -574,6 +574,12 @@ class MotionCommand(CommandTerm):
                 self.time_steps[env_ids_cpu] = (self.time_steps[env_ids_cpu] + 1) % motion_len # weishuai: pick up from where it fails
         else:
             self.time_steps[env_ids_cpu] = 0
+
+    def _resample_command(self, env_ids: Sequence[int]):
+        if len(env_ids) == 0:
+            return
+        env_ids_cpu = env_ids.cpu()
+        self._reset_reference_phase(env_ids_cpu)
 
         root_pos = self.body_pos_w[:, 0].clone()
         root_ori = self.body_quat_w[:, 0].clone()
